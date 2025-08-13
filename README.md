@@ -127,3 +127,135 @@ if len(predictions.shape) >= 2:
 - 拡大率を調整
 - 表示位置を初期化（スライダーを中央に戻す）
 - アプリケーションを再起動
+
+---
+
+# Document Image Segmentation Application
+
+A GUI application that uses a Detectron2-trained Mask R-CNN model (model.onnx) to extract and segment text strings from document images.
+
+## Features
+
+### 1. File Loading
+- **Supported formats**: PDF, PNG, JPG, JPEG
+- **Operation**: Select files using the "Open File" button
+- **Display**: Selected files are displayed in the UI
+
+### 2. PDF Page Operations
+- **Page navigation**: Switch pages using "Previous" and "Next" buttons
+- **Page display**: Shows current page number and total page count
+
+### 3. Display Controls
+- **Zoom**: Adjustable from 0.1x to 3.0x using slider
+- **Position**: Adjust display position with X, Y position sliders
+- **Scroll**: Move image using mouse wheel or scroll bars
+
+### 4. Preprocessing Features
+- **Binarization**: Enable/disable with checkbox, adjust threshold with slider (0-255)
+- **Rotation**: Rotate from -180° to +180° using slider
+- **Distortion correction**: Apply simple distortion correction with checkbox
+
+### 5. Text Recognition
+- **Run recognition**: Detect text regions using ONNX model with "Run Recognition" button
+- **Result display**: Detected bounding boxes are displayed on the image
+
+### 6. Bounding Box Operations
+- **Batch size adjustment**: Scale all bounding boxes simultaneously using sliders
+- **Individual editing**: Manipulate each bounding box individually with mouse
+  - Click to select (displayed in red)
+  - Drag edges to resize
+  - Drag center to move
+  - Corner control points are displayed
+
+## Usage
+
+### 1. Environment Setup
+```bash
+# Initialize project with uv (already completed)
+uv init
+
+# Install dependencies (already completed)
+uv add opencv-python onnxruntime pillow numpy PyMuPDF matplotlib
+```
+
+### 2. Launch Application
+```bash
+uv run python main.py
+```
+
+### 3. Basic Operation Steps
+1. **File selection**: Select image or PDF using "Open File" button
+2. **Display adjustment**: Adjust zoom and position sliders for better viewing
+3. **Preprocessing**: Apply binarization, rotation, or distortion correction as needed
+4. **Run recognition**: Detect text regions using "Run Recognition" button
+5. **Result adjustment**: Adjust bounding box sizes and positions
+
+## File Structure
+
+```
+line_segmentation_app/
+├── main.py          # Main application
+├── model.onnx       # Detectron2 Mask R-CNN model
+├── pyproject.toml   # Project configuration
+└── README.md        # This file
+```
+
+## About the Model
+
+- **Format**: ONNX
+- **Base**: Detectron2 Mask R-CNN
+- **Purpose**: Text extraction from document images
+- **Input**: Image data (resized to 640x640)
+- **Output**: List of bounding box coordinates (output index 0)
+
+## Customization
+
+### Model Output Format Adjustment
+Adjust the output processing in the `run_recognition()` method according to your model's output format:
+
+```python
+# Assume first element of output is bounding boxes
+predictions = outputs[0]
+
+# Adjust according to output format
+if len(predictions.shape) >= 2:
+    for detection in predictions[0]:  # Get first batch
+        if len(detection) >= 4:
+            # Convert coordinates to original image size
+            x1 = int(detection[0] / scale_x)
+            y1 = int(detection[1] / scale_y)
+            x2 = int(detection[2] / scale_x)
+            y2 = int(detection[3] / scale_y)
+            
+            # Confidence check (if confidence is included)
+            confidence = detection[4] if len(detection) > 4 else 1.0
+            if confidence > 0.5:  # Threshold
+                self.bounding_boxes.append([x1, y1, x2, y2])
+```
+
+### Extending Preprocessing
+To add more advanced preprocessing, extend the `apply_preprocessing()` method.
+
+## Notes
+
+- The model.onnx file must exist in the same directory
+- Processing of recognition results may need adjustment depending on the model's output format
+- For large PDF files, please be mindful of memory usage
+- Bounding box operations can be performed more precisely when zoomed in
+
+## Troubleshooting
+
+### Model Loading Error
+- Check if model.onnx file exists
+- Verify the file is not corrupted
+- Ensure ONNX Runtime version compatibility
+
+### Recognition Results Not Displayed
+- Check model output format
+- Adjust confidence threshold
+- Adjust preprocessing parameters
+
+### Display Issues
+- Adjust zoom level
+- Reset display position (return sliders to center)
+- Restart the application

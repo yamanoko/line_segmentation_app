@@ -444,11 +444,11 @@ class DocumentSegmentationApp:
     def run_recognition(self):
         """ONNXモデルで認識実行"""
         if self.processed_image is None:
-            messagebox.showwarning("警告", "画像が読み込まれていません")
+            messagebox.showwarning("Warning", "No image loaded")
             return
 
         if self.onnx_session is None:
-            messagebox.showerror("エラー", "ONNXモデルが読み込まれていません")
+            messagebox.showerror("Error", "ONNX model not loaded")
             return
 
         try:
