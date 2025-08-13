@@ -1,0 +1,18 @@
+{
+	"[python]": {
+		"editor.defaultFormatter": "charliermarsh.ruff",
+		"editor.formatOnSave": true,
+		"editor.codeActionsOnSave": {
+			"source.organizeImports.ruff": "explicit",
+			"source.fixAll.ruff": "explicit"
+		}
+	},
+	"flake8.args": [
+		"--ignore=E501,W503",
+	],
+	"python.testing.pytestArgs": [
+		"."
+	],
+	"python.testing.unittestEnabled": false,
+	"python.testing.pytestEnabled": true
+}
