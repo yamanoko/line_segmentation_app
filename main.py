@@ -223,6 +223,15 @@ class DocumentSegmentationApp:
         )
         bbox_height_slider.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
 
+        # Bounding box operations
+        bbox_operations_frame = ttk.Frame(bbox_frame)
+        bbox_operations_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(
+            bbox_operations_frame,
+            text="Delete Selected",
+            command=self.delete_selected_bbox,
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
         # Image saving
         save_frame = ttk.LabelFrame(left_panel, text="Image Saving")
         save_frame.pack(fill=tk.X, pady=(0, 10))
@@ -796,6 +805,41 @@ class DocumentSegmentationApp:
                 break
 
         self.canvas.config(cursor=cursor)
+
+    def delete_selected_bbox(self):
+        """Delete selected bounding box"""
+        if self.selected_box_index < 0:
+            messagebox.showwarning("Warning", "Please select a bounding box to delete")
+            return
+
+        if len(self.bounding_boxes) == 0:
+            messagebox.showwarning("Warning", "No bounding boxes to delete")
+            return
+
+        # Confirm deletion
+        result = messagebox.askyesno(
+            "Confirm Deletion",
+            f"Are you sure you want to delete bounding box {self.selected_box_index + 1}?",
+        )
+
+        if result:
+            # Remove the selected bounding box
+            del self.bounding_boxes[self.selected_box_index]
+
+            # Also remove from original bounding boxes if it exists
+            if self.selected_box_index < len(self.original_bounding_boxes):
+                del self.original_bounding_boxes[self.selected_box_index]
+
+            # Adjust selection index if necessary
+            if self.selected_box_index >= len(self.bounding_boxes):
+                self.selected_box_index = len(self.bounding_boxes) - 1
+            if len(self.bounding_boxes) == 0:
+                self.selected_box_index = -1
+
+            # Update display
+            self.update_display()
+
+            messagebox.showinfo("Success", "Bounding box deleted successfully")
 
 
 def main():
