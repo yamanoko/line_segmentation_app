@@ -7,7 +7,10 @@ import cv2
 import fitz  # PyMuPDF
 import numpy as np
 import onnxruntime as ort
+import torch
 from PIL import Image, ImageTk
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 
 class DocumentSegmentationApp:
@@ -37,6 +40,33 @@ class DocumentSegmentationApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load ONNX model: {e}")
             self.onnx_session = None
+
+        # Load SAM2 model
+        try:
+            self.sam2_checkpoint = "./sam2_repo/checkpoints/sam2.1_hiera_tiny.pt"
+            self.sam2_model_cfg = "C:/Users/yaman/line_segmentation_app/sam2_repo/sam2/configs/sam2.1/sam2.1_hiera_t.yaml"
+
+            # Check if SAM2 files exist
+            if os.path.exists(self.sam2_checkpoint) and os.path.exists(
+                self.sam2_model_cfg
+            ):
+                self.sam2_predictor = SAM2ImagePredictor(
+                    build_sam2(self.sam2_model_cfg, self.sam2_checkpoint)
+                )
+                self.use_sam2 = True
+                print("SAM2 model loaded successfully")
+                # Update GUI status - will be called after GUI creation
+                self.root.after(100, self.update_sam2_status)
+            else:
+                self.sam2_predictor = None
+                self.use_sam2 = False
+                print("SAM2 files not found, will use ONNX results only")
+                self.root.after(100, self.update_sam2_status)
+        except Exception as e:
+            print(f"Failed to load SAM2 model: {e}")
+            self.sam2_predictor = None
+            self.use_sam2 = False
+            self.root.after(100, self.update_sam2_status)
 
         # GUI components creation
         self.create_widgets()
@@ -186,6 +216,29 @@ class DocumentSegmentationApp:
         # Recognition
         recognition_frame = ttk.LabelFrame(left_panel, text="Recognition")
         recognition_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # SAM2 status
+        sam2_status_frame = ttk.Frame(recognition_frame)
+        sam2_status_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(sam2_status_frame, text="SAM2 Status:").pack(side=tk.LEFT)
+        self.sam2_status_label = ttk.Label(
+            sam2_status_frame, text="Loading...", foreground="orange"
+        )
+        self.sam2_status_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # SAM2 toggle
+        sam2_frame = ttk.Frame(recognition_frame)
+        sam2_frame.pack(fill=tk.X, pady=2)
+        self.sam2_enabled = tk.BooleanVar(
+            value=False
+        )  # Will be updated after SAM2 loading
+        self.sam2_checkbox = ttk.Checkbutton(
+            sam2_frame,
+            text="Use SAM2 Refinement",
+            variable=self.sam2_enabled,
+            command=self.toggle_sam2,
+        )
+        self.sam2_checkbox.pack(side=tk.LEFT)
 
         ttk.Button(
             recognition_frame, text="Run Recognition", command=self.run_recognition
@@ -504,8 +557,7 @@ class DocumentSegmentationApp:
             predictions = outputs[0]
 
             # Extract bounding boxes (format depends on model)
-            self.bounding_boxes = []
-            self.original_bounding_boxes = []  # Save originals
+            onnx_bboxes = []
 
             if predictions.shape[0] == 0:
                 messagebox.showinfo("Information", "No recognition results")
@@ -527,18 +579,136 @@ class DocumentSegmentationApp:
                         confidence = detection[4] if len(detection) > 4 else 1.0
                         if confidence > 0.5:  # Threshold
                             bbox = [x1, y1, x2, y2]
-                            self.bounding_boxes.append(bbox)
-                            self.original_bounding_boxes.append(
-                                bbox.copy()
-                            )  # Save original
+                            onnx_bboxes.append(bbox)
+
+            # Use SAM2 for segmentation if available
+            if self.use_sam2 and self.sam2_predictor is not None and onnx_bboxes:
+                segmented_bboxes = self.run_sam2_segmentation(onnx_bboxes)
+                if segmented_bboxes:
+                    self.bounding_boxes = segmented_bboxes
+                    self.original_bounding_boxes = [
+                        bbox.copy() for bbox in segmented_bboxes
+                    ]
+                else:
+                    # Fallback to ONNX results
+                    self.bounding_boxes = onnx_bboxes
+                    self.original_bounding_boxes = [bbox.copy() for bbox in onnx_bboxes]
+            else:
+                # Use ONNX results directly
+                self.bounding_boxes = onnx_bboxes
+                self.original_bounding_boxes = [bbox.copy() for bbox in onnx_bboxes]
 
             # Reflect results in display
             self.update_display()
             detection_count = len(self.bounding_boxes)
-            messagebox.showinfo("Complete", f"Detected {detection_count} text regions")
+            sam2_status = (
+                " (with SAM2 refinement)"
+                if self.use_sam2 and self.sam2_predictor is not None
+                else ""
+            )
+            messagebox.showinfo(
+                "Complete", f"Detected {detection_count} text regions{sam2_status}"
+            )
 
         except Exception as e:
             messagebox.showerror("Error", f"Error occurred during recognition: {e}")
+
+    def run_sam2_segmentation(self, onnx_bboxes):
+        """Run SAM2 segmentation using ONNX bounding boxes as prompts"""
+        try:
+            if not self.sam2_predictor:
+                return None
+
+            # Prepare image for SAM2
+            image_rgb = cv2.cvtColor(self.processed_image, cv2.COLOR_BGR2RGB)
+
+            # Set image for SAM2 predictor
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+            with torch.inference_mode(), torch.autocast(device, dtype=dtype):
+                self.sam2_predictor.set_image(image_rgb)
+
+                refined_bboxes = []
+
+                for bbox in onnx_bboxes:
+                    x1, y1, x2, y2 = bbox
+
+                    # Convert to SAM2 box format [x1, y1, x2, y2]
+                    input_box = np.array([x1, y1, x2, y2])
+
+                    # Run SAM2 prediction with box prompt
+                    masks, scores, logits = self.sam2_predictor.predict(
+                        point_coords=None,
+                        point_labels=None,
+                        box=input_box[None, :],
+                        multimask_output=False,
+                    )
+
+                    if len(masks) > 0 and masks[0] is not None:
+                        # Get the best mask
+                        mask = masks[0]
+
+                        # Find bounding box of the mask
+                        refined_bbox = self.mask_to_bbox(mask)
+                        if refined_bbox:
+                            refined_bboxes.append(refined_bbox)
+                        else:
+                            # Fallback to original bbox if mask processing fails
+                            refined_bboxes.append(bbox)
+                    else:
+                        # Fallback to original bbox if no mask is generated
+                        refined_bboxes.append(bbox)
+
+                return refined_bboxes
+
+        except Exception as e:
+            print(f"SAM2 segmentation failed: {e}")
+            return None
+
+    def mask_to_bbox(self, mask):
+        """Convert mask to bounding box"""
+        try:
+            # Find contours in the mask
+            mask_uint8 = (mask * 255).astype(np.uint8)
+            contours, _ = cv2.findContours(
+                mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            if not contours:
+                return None
+
+            # Get the largest contour
+            largest_contour = max(contours, key=cv2.contourArea)
+
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(largest_contour)
+
+            return [x, y, x + w, y + h]
+
+        except Exception as e:
+            print(f"Error converting mask to bbox: {e}")
+            return None
+
+    def update_sam2_status(self):
+        """Update SAM2 status in GUI"""
+        if hasattr(self, "sam2_status_label"):
+            if self.sam2_predictor is not None:
+                self.sam2_status_label.config(text="Ready", foreground="green")
+                self.sam2_enabled.set(True)
+                self.sam2_checkbox.config(state="normal")
+            else:
+                self.sam2_status_label.config(text="Not Available", foreground="red")
+                self.sam2_enabled.set(False)
+                self.sam2_checkbox.config(state="disabled")
+
+    def toggle_sam2(self):
+        """Toggle SAM2 usage"""
+        self.use_sam2 = self.sam2_enabled.get() and self.sam2_predictor is not None
+        if self.use_sam2:
+            print("SAM2 refinement enabled")
+        else:
+            print("SAM2 refinement disabled")
 
     def update_bbox_scale(self, *args):
         """Update bounding box scale"""
