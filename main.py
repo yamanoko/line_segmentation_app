@@ -1,13 +1,32 @@
 import io
 import os
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import cv2
 import fitz  # PyMuPDF
 import numpy as np
-import onnxruntime as ort
 from PIL import Image, ImageTk
+
+# Try to import torch and Hi-SAM modules
+try:
+    import torch
+
+    torch_available = True
+
+    # Hi-SAM imports
+    sys.path.append(os.path.join(os.path.dirname(__file__), "Hi-SAM"))
+    from hi_sam.modeling.auto_mask_generator import AutoMaskGenerator
+    from hi_sam.modeling.build import model_registry
+
+    hisam_available = True
+
+except ImportError as e:
+    torch_available = False
+    hisam_available = False
+    print(f"Warning: PyTorch or Hi-SAM not available: {e}")
+    print("The application will run without text line detection capability.")
 
 
 class DocumentSegmentationApp:
@@ -16,37 +35,130 @@ class DocumentSegmentationApp:
         self.root.title("Document Image Segmentation App")
         self.root.geometry("1200x800")
 
-        # Application state
         self.current_file_path = None
         self.current_page = 0
         self.total_pages = 0
         self.original_image = None
         self.processed_image = None
         self.displayed_image = None
-        self.bounding_boxes = []
-        self.original_bounding_boxes = []  # Original bounding boxes
+        self.segmentation_masks = []  # セグメンテーションマスクのリスト
+        self.original_segmentation_masks = []  # 元のセグメンテーションマスク
         self.photo = None
         self.scale_factor = 1.0
         self.offset_x = 0
         self.offset_y = 0
         self.save_directory = None  # Save directory
 
-        # Load ONNX model
-        try:
-            self.onnx_session = ort.InferenceSession("model.onnx")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load ONNX model: {e}")
-            self.onnx_session = None
+        # Load Hi-SAM model
+        self.hi_sam_model = None
+        self.auto_mask_generator = None
+        self.model_type = "vit_s"  # デフォルトは軽量モデル
+        self.load_hi_sam_model()
 
         # GUI components creation
         self.create_widgets()
 
-        # Variables for bounding box operations
-        self.selected_box_index = -1
+        # Variables for mask operations
+        self.selected_mask_index = -1
         self.dragging = False
         self.drag_start_x = 0
         self.drag_start_y = 0
-        self.drag_edge = None  # 'left', 'right', 'top', 'bottom', 'move'
+
+    def load_hi_sam_model(self):
+        """Load Hi-SAM model"""
+        if not torch_available or not hisam_available:
+            print(
+                "PyTorch or Hi-SAM not available. Text line detection will be disabled."
+            )
+            self.hi_sam_model = None
+            self.auto_mask_generator = None
+            return
+
+        try:
+            # Hi-SAMモデルのパラメータ設定（軽量版）
+            class Args:
+                def __init__(self):
+                    # 利用可能なモデル:
+                    # "vit_s" - Efficient Hi-SAM Small (最軽量、高速)
+                    # "vit_b" - Hi-SAM Base (バランス型)
+                    # "vit_l" - Hi-SAM Large (高精度、重い)
+                    self.model_type = "vit_s"  # 軽量なEfficient Hi-SAM Smallを使用
+
+                    # 学習済みチェックポイントを指定
+                    checkpoint_dir = os.path.join(
+                        os.path.dirname(__file__), "Hi-SAM", "pretrained_checkpoint"
+                    )
+
+                    # モデルタイプに応じてチェックポイントを選択
+                    if self.model_type == "vit_s":
+                        self.checkpoint = os.path.join(
+                            checkpoint_dir, "efficient_hi_sam_s.pth"
+                        )
+                    elif self.model_type == "vit_b":
+                        self.checkpoint = os.path.join(
+                            checkpoint_dir, "sam_tss_b_textseg.pth"
+                        )
+                    elif self.model_type == "vit_l":
+                        self.checkpoint = os.path.join(checkpoint_dir, "hi_sam_l.pth")
+                    else:
+                        self.checkpoint = None
+
+                    self.hier_det = True
+                    self.attn_layers = 1
+                    self.prompt_len = 12
+                    self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            args = Args()
+
+            # チェックポイントファイルの存在確認
+            if not os.path.exists(args.checkpoint):
+                print(f"Warning: Checkpoint file not found: {args.checkpoint}")
+                print("Using model without pre-trained weights.")
+                args.checkpoint = None
+            else:
+                print(f"Loading checkpoint: {args.checkpoint}")
+
+            # モデルを構築
+            print("Building Hi-SAM model...")
+            self.hi_sam_model = model_registry[args.model_type](args)
+            self.hi_sam_model = self.hi_sam_model.to(args.device)
+            self.hi_sam_model.eval()
+
+            # AutoMaskGeneratorを初期化（モデルタイプに応じて設定）
+            efficient_hisam = args.model_type in [
+                "vit_s",
+                "vit_t",
+            ]  # Efficient Hi-SAMかどうか
+            self.auto_mask_generator = AutoMaskGenerator(
+                self.hi_sam_model, efficient_hisam=efficient_hisam
+            )
+
+            # モデルタイプを保存（後で使用）
+            self.model_type = args.model_type
+
+            if args.checkpoint:
+                print(
+                    f"Hi-SAM model loaded successfully on {args.device} with pre-trained weights"
+                )
+            else:
+                print(
+                    f"Hi-SAM model loaded successfully on {args.device} without pre-trained weights"
+                )
+                print(
+                    "Note: For better results, please download and load appropriate checkpoints."
+                )
+
+        except Exception as e:
+            import traceback
+
+            print(f"Error loading Hi-SAM model: {e}")
+            print(traceback.format_exc())
+            messagebox.showwarning(
+                "Warning",
+                f"Failed to load Hi-SAM model: {e}\nThe application will run without text line detection capability.",
+            )
+            self.hi_sam_model = None
+            self.auto_mask_generator = None
 
     def create_widgets(self):
         # Main frame
@@ -191,45 +303,17 @@ class DocumentSegmentationApp:
             recognition_frame, text="Run Recognition", command=self.run_recognition
         ).pack(pady=5)
 
-        # Bounding box adjustment
-        bbox_frame = ttk.LabelFrame(left_panel, text="Bounding Box Adjustment")
-        bbox_frame.pack(fill=tk.X, pady=(0, 10))
+        # Segmentation mask adjustment
+        mask_frame = ttk.LabelFrame(left_panel, text="Segmentation Mask Adjustment")
+        mask_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # Width adjustment
-        bbox_width_frame = ttk.Frame(bbox_frame)
-        bbox_width_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(bbox_width_frame, text="Width:").pack(side=tk.LEFT)
-        self.bbox_width_scale = tk.DoubleVar(value=1.0)
-        bbox_width_slider = ttk.Scale(
-            bbox_width_frame,
-            from_=0.5,
-            to=2.0,
-            variable=self.bbox_width_scale,
-            command=self.update_bbox_scale,
-        )
-        bbox_width_slider.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
-
-        # Height adjustment
-        bbox_height_frame = ttk.Frame(bbox_frame)
-        bbox_height_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(bbox_height_frame, text="Height:").pack(side=tk.LEFT)
-        self.bbox_height_scale = tk.DoubleVar(value=1.0)
-        bbox_height_slider = ttk.Scale(
-            bbox_height_frame,
-            from_=0.5,
-            to=2.0,
-            variable=self.bbox_height_scale,
-            command=self.update_bbox_scale,
-        )
-        bbox_height_slider.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
-
-        # Bounding box operations
-        bbox_operations_frame = ttk.Frame(bbox_frame)
-        bbox_operations_frame.pack(fill=tk.X, pady=5)
+        # Mask operations
+        mask_operations_frame = ttk.Frame(mask_frame)
+        mask_operations_frame.pack(fill=tk.X, pady=5)
         ttk.Button(
-            bbox_operations_frame,
+            mask_operations_frame,
             text="Delete Selected",
-            command=self.delete_selected_bbox,
+            command=self.delete_selected_mask,
         ).pack(side=tk.LEFT, padx=(0, 5))
 
         # Image saving
@@ -406,39 +490,41 @@ class DocumentSegmentationApp:
         new_height = int(height * scale)
         resized_image = cv2.resize(self.processed_image, (new_width, new_height))
 
-        # Draw bounding boxes
+        # Draw segmentation masks
         display_image = resized_image.copy()
-        for i, bbox in enumerate(self.bounding_boxes):
-            x1, y1, x2, y2 = bbox
-            # Adjust coordinates according to scale
-            x1_scaled = int(x1 * scale)
-            y1_scaled = int(y1 * scale)
-            x2_scaled = int(x2 * scale)
-            y2_scaled = int(y2 * scale)
 
-            # Draw bounding box
-            is_selected = i == self.selected_box_index
-            color = (0, 255, 0) if not is_selected else (0, 0, 255)
-            cv2.rectangle(
-                display_image, (x1_scaled, y1_scaled), (x2_scaled, y2_scaled), color, 2
+        for i, mask in enumerate(self.segmentation_masks):
+            # マスクをスケールに合わせてリサイズ
+            mask_scaled = cv2.resize(
+                mask.astype(np.uint8),
+                (new_width, new_height),
+                interpolation=cv2.INTER_NEAREST,
             )
 
-            # Draw corner manipulation points
+            # Selected mask highlighting
+            is_selected = i == self.selected_mask_index
+
+            # マスクを可視化するための色
             if is_selected:
-                point_size = 5
-                point_color = (255, 0, 0)
-                cv2.circle(
-                    display_image, (x1_scaled, y1_scaled), point_size, point_color, -1
-                )
-                cv2.circle(
-                    display_image, (x2_scaled, y1_scaled), point_size, point_color, -1
-                )
-                cv2.circle(
-                    display_image, (x1_scaled, y2_scaled), point_size, point_color, -1
-                )
-                cv2.circle(
-                    display_image, (x2_scaled, y2_scaled), point_size, point_color, -1
-                )
+                color = [255, 0, 0]  # 選択されたマスクは赤
+                alpha = 0.6
+            else:
+                color = [0, 255, 0]  # その他のマスクは緑
+                alpha = 0.4
+
+            # マスクのオーバーレイを作成
+            mask_overlay = np.zeros_like(display_image)
+            mask_overlay[mask_scaled > 0] = color
+
+            # マスクをオーバーレイで合成
+            display_image = cv2.addWeighted(display_image, 1, mask_overlay, alpha, 0)
+
+            # マスクの輪郭を描画
+            contours, _ = cv2.findContours(
+                mask_scaled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            contour_color = (0, 0, 255) if is_selected else (0, 255, 0)
+            cv2.drawContours(display_image, contours, -1, contour_color, 2)
 
         # Convert image to Tkinter format
         self.displayed_image = cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
@@ -451,123 +537,144 @@ class DocumentSegmentationApp:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def run_recognition(self):
-        """Run recognition with ONNX model"""
+        """Run text line segmentation with Hi-SAM model"""
         if self.processed_image is None:
             messagebox.showwarning("Warning", "No image loaded")
             return
 
-        if self.onnx_session is None:
-            messagebox.showerror("Error", "ONNX model not loaded")
+        if self.hi_sam_model is None or self.auto_mask_generator is None:
+            messagebox.showerror("Error", "Hi-SAM model not loaded")
             return
 
         try:
-            # Preprocess image (adjust according to model requirements)
+            # CUDAメモリクリーンアップ（処理前）
+            if torch_available and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print(
+                    f"CUDA memory cleared. Available: {torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()} bytes"
+                )
+
+            # 画像をRGB形式に変換
             image = self.processed_image.copy()
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-            # Get model input size dynamically
-            input_shape = self.onnx_session.get_inputs()[0].shape
-            # Input shape is 3-dimensional [channels, height, width]
-            if len(input_shape) == 3:
-                if input_shape[0] == 3:  # CHW format
-                    input_height, input_width = input_shape[1], input_shape[2]
-                else:  # HWC format
-                    input_height, input_width = input_shape[0], input_shape[1]
-            elif len(input_shape) == 4:
-                # 4-dimensional case (with batch dimension)
-                if input_shape[1] == 3:  # NCHW format
-                    input_height, input_width = input_shape[2], input_shape[3]
-                else:  # NHWC format
-                    input_height, input_width = input_shape[1], input_shape[2]
+            # Hi-SAMで画像を設定
+            self.auto_mask_generator.set_image(image_rgb)
+
+            # テキストライン検出のパラメータ（ライン検出に最適化）
+            if self.model_type == "vit_s":
+                # Efficient Hi-SAM Small用 - ライン検出設定
+                fg_points_num = 120  # ライン検出のため増加
+                batch_points_num = 20  # メモリ効率維持
+                score_thresh = 0.5  # CTW1500に適した閾値
+                nms_thresh = 0.4  # NMS閾値
+            elif self.model_type == "vit_b":
+                # Hi-SAM Base用のライン検出設定
+                fg_points_num = 200
+                batch_points_num = 40
+                score_thresh = 0.6
+                nms_thresh = 0.5
+            else:  # vit_l
+                # Hi-SAM Large用のライン検出設定
+                fg_points_num = 300
+                batch_points_num = 60
+                score_thresh = 0.7
+                nms_thresh = 0.6
+
+            zero_shot = False  # 学習済みモデルを使用
+            dataset = "ctw1500"  # CTW1500データセット（直接ライン検出を行う）
+
+            # テキストライン検出を実行
+            print("Running Hi-SAM text line segmentation...")
+            masks, scores = self.auto_mask_generator.predict_text_detection(
+                from_low_res=True,  # 低解像度から開始してより大きなマスクを生成
+                fg_points_num=fg_points_num,
+                batch_points_num=batch_points_num,
+                score_thresh=score_thresh,
+                nms_thresh=nms_thresh,
+                zero_shot=zero_shot,
+                dataset=dataset,
+            )
+
+            # CUDAメモリクリーンアップ（処理後）
+            if torch_available and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            if masks is not None and len(masks) > 0:
+                print(f"Found {len(masks)} text line masks (directly from Hi-SAM)")
+
+                # セグメンテーションマスクを保存（直接ライン単位のマスクを使用）
+                self.segmentation_masks = []
+                self.original_segmentation_masks = []
+
+                for i, mask in enumerate(masks):
+                    # マスクが3次元の場合、2次元に変換
+                    if len(mask.shape) == 3:
+                        mask = mask[0]  # 最初のチャンネルを使用
+
+                    # マスクをブール型に変換
+                    mask_bool = mask > 0.5
+
+                    self.segmentation_masks.append(mask_bool)
+                    self.original_segmentation_masks.append(mask_bool.copy())
+
+                # 表示を更新
+                self.update_display()
+                messagebox.showinfo(
+                    "Complete", f"Detected {len(masks)} text line regions"
+                )
+
             else:
-                # Use default values
-                input_height, input_width = 640, 640
-
-            height, width = image.shape[:2]
-            scale_x = input_width / width
-            scale_y = input_height / height
-
-            resized_image = cv2.resize(image, (input_width, input_height))
-
-            # Normalize and add batch dimension
-            input_data = resized_image.astype(np.float32)
-            input_data = np.transpose(input_data, (2, 0, 1))  # HWC -> CHW
-
-            # Run inference
-            input_name = self.onnx_session.get_inputs()[0].name
-
-            output_names = [output.name for output in self.onnx_session.get_outputs()]
-            outputs = self.onnx_session.run(output_names, {input_name: input_data})
-
-            print("Inference results:", outputs)
-            # Assume first element of output is bounding boxes
-            predictions = outputs[0]
-
-            # Extract bounding boxes (format depends on model)
-            self.bounding_boxes = []
-            self.original_bounding_boxes = []  # Save originals
-
-            if predictions.shape[0] == 0:
-                messagebox.showinfo("Information", "No recognition results")
-                return
-
-            # Temporary processing: adjust according to output format
-            if len(predictions.shape) >= 2:
-                for detection in predictions:  # Get first batch
-                    print("Detection result:", detection)
-                    print("Detection result shape:", detection.shape)
-                    if detection.shape[0] >= 4:
-                        # Convert coordinates to original image size
-                        x1 = int(detection[0] / scale_x)
-                        y1 = int(detection[1] / scale_y)
-                        x2 = int(detection[2] / scale_x)
-                        y2 = int(detection[3] / scale_y)
-
-                        # Confidence check (if confidence is included)
-                        confidence = detection[4] if len(detection) > 4 else 1.0
-                        if confidence > 0.5:  # Threshold
-                            bbox = [x1, y1, x2, y2]
-                            self.bounding_boxes.append(bbox)
-                            self.original_bounding_boxes.append(
-                                bbox.copy()
-                            )  # Save original
-
-            # Reflect results in display
-            self.update_display()
-            detection_count = len(self.bounding_boxes)
-            messagebox.showinfo("Complete", f"Detected {detection_count} text regions")
+                messagebox.showinfo("Information", "No text line regions detected")
 
         except Exception as e:
+            import traceback
+
+            print(f"Error in Hi-SAM recognition: {e}")
+            print(traceback.format_exc())
+
+            # CUDAメモリクリーンアップ
+            if torch_available and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             messagebox.showerror("Error", f"Error occurred during recognition: {e}")
 
-    def update_bbox_scale(self, *args):
-        """Update bounding box scale"""
-        if not self.original_bounding_boxes:
+    def delete_selected_mask(self):
+        """Delete selected segmentation mask"""
+        if self.selected_mask_index < 0:
+            messagebox.showwarning(
+                "Warning", "Please select a segmentation mask to delete"
+            )
             return
 
-        width_scale = self.bbox_width_scale.get()
-        height_scale = self.bbox_height_scale.get()
+        if len(self.segmentation_masks) == 0:
+            messagebox.showwarning("Warning", "No segmentation masks to delete")
+            return
 
-        # Adjust each bounding box from original size
-        for i, original_bbox in enumerate(self.original_bounding_boxes):
-            x1, y1, x2, y2 = original_bbox
-            center_x = (x1 + x2) / 2
-            center_y = (y1 + y2) / 2
-            original_width = x2 - x1
-            original_height = y2 - y1
+        # Confirm deletion
+        result = messagebox.askyesno(
+            "Confirm Deletion",
+            f"Are you sure you want to delete segmentation mask {self.selected_mask_index + 1}?",
+        )
 
-            # Calculate new size
-            new_width = original_width * width_scale
-            new_height = original_height * height_scale
+        if result:
+            # Remove the selected mask
+            del self.segmentation_masks[self.selected_mask_index]
 
-            self.bounding_boxes[i] = [
-                int(center_x - new_width / 2),
-                int(center_y - new_height / 2),
-                int(center_x + new_width / 2),
-                int(center_y + new_height / 2),
-            ]
+            # Also remove from original masks if it exists
+            if self.selected_mask_index < len(self.original_segmentation_masks):
+                del self.original_segmentation_masks[self.selected_mask_index]
 
-        self.update_display()
+            # Adjust selection index if necessary
+            if self.selected_mask_index >= len(self.segmentation_masks):
+                self.selected_mask_index = len(self.segmentation_masks) - 1
+            if len(self.segmentation_masks) == 0:
+                self.selected_mask_index = -1
+
+            # Update display
+            self.update_display()
+
+            messagebox.showinfo("Success", "Segmentation mask deleted successfully")
 
     def select_save_directory(self):
         """Select save directory"""
@@ -581,9 +688,9 @@ class DocumentSegmentationApp:
             self.save_dir_label.config(text=display_path, foreground="black")
 
     def save_all_crops(self):
-        """Save all images within bounding boxes"""
-        if not self.bounding_boxes:
-            messagebox.showwarning("Warning", "No bounding boxes to save")
+        """Save all images within segmentation masks"""
+        if not self.segmentation_masks:
+            messagebox.showwarning("Warning", "No segmentation masks to save")
             return
 
         if not self.save_directory:
@@ -596,8 +703,8 @@ class DocumentSegmentationApp:
 
         try:
             saved_count = 0
-            for i, bbox in enumerate(self.bounding_boxes):
-                success = self._save_crop_image(bbox, i)
+            for i, mask in enumerate(self.segmentation_masks):
+                success = self._save_masked_image(mask, i)
                 if success:
                     saved_count += 1
 
@@ -607,9 +714,9 @@ class DocumentSegmentationApp:
             messagebox.showerror("Error", f"Error occurred during saving: {e}")
 
     def save_selected_crop(self):
-        """Save image within selected bounding box"""
-        if self.selected_box_index < 0:
-            messagebox.showwarning("Warning", "Please select a bounding box")
+        """Save image within selected segmentation mask"""
+        if self.selected_mask_index < 0:
+            messagebox.showwarning("Warning", "Please select a segmentation mask")
             return
 
         if not self.save_directory:
@@ -621,8 +728,8 @@ class DocumentSegmentationApp:
             return
 
         try:
-            bbox = self.bounding_boxes[self.selected_box_index]
-            success = self._save_crop_image(bbox, self.selected_box_index)
+            mask = self.segmentation_masks[self.selected_mask_index]
+            success = self._save_masked_image(mask, self.selected_mask_index)
 
             if success:
                 messagebox.showinfo("Complete", "Image saved")
@@ -630,57 +737,77 @@ class DocumentSegmentationApp:
         except Exception as e:
             messagebox.showerror("Error", f"Error occurred during saving: {e}")
 
-    def _save_crop_image(self, bbox, index):
-        """Crop and save the image within the bounding box"""
+    def _save_masked_image(self, mask, index):
+        """Extract and save the image within the segmentation mask"""
         try:
-            x1, y1, x2, y2 = bbox
+            # マスクをnumpy配列に変換（必要に応じて）
+            if torch_available and torch.is_tensor(mask):
+                mask = mask.cpu().numpy()
 
-            # Limit coordinates within image size
+            mask = mask.astype(np.uint8)
+
+            # マスクの境界ボックスを取得
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            if len(contours) == 0:
+                print(f"No contours found in mask {index}")
+                return False
+
+            # 最大の輪郭を選択
+            largest_contour = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(largest_contour)
+
+            # 画像サイズ内に制限
             height, width = self.processed_image.shape[:2]
-            x1 = max(0, min(x1, width))
-            y1 = max(0, min(y1, height))
-            x2 = max(0, min(x2, width))
-            y2 = max(0, min(y2, height))
+            x = max(0, min(x, width))
+            y = max(0, min(y, height))
+            w = min(w, width - x)
+            h = min(h, height - y)
 
-            # Check coordinate order
-            if x1 >= x2 or y1 >= y2:
-                print(f"Invalid bounding box {index}: ({x1}, {y1}, {x2}, {y2})")
+            if w <= 0 or h <= 0:
+                print(f"Invalid mask dimensions {index}: ({x}, {y}, {w}, {h})")
                 return False
 
-            # Crop image
-            cropped_image = self.processed_image[y1:y2, x1:x2]
+            # マスクの該当部分を切り出し
+            mask_crop = mask[y : y + h, x : x + w]
+            image_crop = self.processed_image[y : y + h, x : x + w]
 
-            if cropped_image.size == 0:
-                print(f"Empty cropped image {index}")
+            # マスクを適用して背景を白にする
+            masked_image = image_crop.copy()
+            masked_image[mask_crop == 0] = [255, 255, 255]  # 白背景
+
+            if masked_image.size == 0:
+                print(f"Empty masked image {index}")
                 return False
 
-            # Generate filename
-            base_name = "cropped_text"
+            # ファイル名を生成
+            base_name = "segmented_text"
             if self.current_file_path:
                 file_name = os.path.splitext(os.path.basename(self.current_file_path))[
                     0
                 ]
-                base_name = f"{file_name}_crop"
+                base_name = f"{file_name}_seg"
 
-            # Add page number (for PDF)
+            # ページ番号を追加（PDFの場合）
             if self.total_pages > 1:
-                base_name += f"_page{self.current_page + 1}"
+                base_name += f"_page{self.current_page + 1:03d}"
 
-            # Add index
+            # インデックスを追加
             output_filename = f"{base_name}_{index:03d}.png"
             output_path = os.path.join(self.save_directory, output_filename)
 
-            # Save image
-            cv2.imwrite(output_path, cropped_image)
+            # 画像を保存
+            cv2.imwrite(output_path, masked_image)
             print(f"Save complete: {output_path}")
             return True
 
         except Exception as e:
-            print(f"Crop save error {index}: {e}")
+            print(f"Masked image save error {index}: {e}")
             return False
 
     def on_canvas_click(self, event):
-        """Canvas click handling"""
+        """Canvas click handling for segmentation masks"""
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
 
         # Coordinate transformation considering display scale
@@ -691,87 +818,35 @@ class DocumentSegmentationApp:
         img_x = int((x - offset_x) / scale)
         img_y = int((y - offset_y) / scale)
 
-        # Bounding box selection
-        self.selected_box_index = -1
-        for i, bbox in enumerate(self.bounding_boxes):
-            x1, y1, x2, y2 = bbox
-            if x1 <= img_x <= x2 and y1 <= img_y <= y2:
-                self.selected_box_index = i
-                break
+        # セグメンテーションマスクの選択
+        self.selected_mask_index = -1
 
-        if self.selected_box_index >= 0:
-            self.dragging = True
-            self.drag_start_x = img_x
-            self.drag_start_y = img_y
+        # 画像の範囲内かチェック
+        if self.processed_image is not None:
+            height, width = self.processed_image.shape[:2]
+            if 0 <= img_x < width and 0 <= img_y < height:
+                # 各マスクをチェックして、クリック位置がマスク内かどうか確認
+                for i, mask in enumerate(self.segmentation_masks):
+                    if torch_available and torch.is_tensor(mask):
+                        mask_np = mask.cpu().numpy()
+                    else:
+                        mask_np = mask
 
-            # Determine which edge to drag
-            bbox = self.bounding_boxes[self.selected_box_index]
-            x1, y1, x2, y2 = bbox
-
-            edge_threshold = 10
-            if abs(img_x - x1) < edge_threshold:
-                self.drag_edge = "left"
-            elif abs(img_x - x2) < edge_threshold:
-                self.drag_edge = "right"
-            elif abs(img_y - y1) < edge_threshold:
-                self.drag_edge = "top"
-            elif abs(img_y - y2) < edge_threshold:
-                self.drag_edge = "bottom"
-            else:
-                self.drag_edge = "move"
+                    if mask_np[img_y, img_x] > 0:
+                        self.selected_mask_index = i
+                        break
 
         self.update_display()
 
     def on_canvas_drag(self, event):
-        """Canvas drag handling"""
-        if not self.dragging or self.selected_box_index < 0:
-            return
-
-        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
-
-        # Coordinate transformation considering display scale
-        scale = self.scale_var.get()
-        offset_x = int(self.x_var.get())
-        offset_y = int(self.y_var.get())
-
-        img_x = int((x - offset_x) / scale)
-        img_y = int((y - offset_y) / scale)
-
-        # Update bounding box
-        bbox = self.bounding_boxes[self.selected_box_index]
-        x1, y1, x2, y2 = bbox
-
-        if self.drag_edge == "left":
-            x1 = img_x
-        elif self.drag_edge == "right":
-            x2 = img_x
-        elif self.drag_edge == "top":
-            y1 = img_y
-        elif self.drag_edge == "bottom":
-            y2 = img_y
-        elif self.drag_edge == "move":
-            dx = img_x - self.drag_start_x
-            dy = img_y - self.drag_start_y
-            x1 += dx
-            y1 += dy
-            x2 += dx
-            y2 += dy
-            self.drag_start_x = img_x
-            self.drag_start_y = img_y
-
-        # Keep coordinate order correct
-        if x1 > x2:
-            x1, x2 = x2, x1
-        if y1 > y2:
-            y1, y2 = y2, y1
-
-        self.bounding_boxes[self.selected_box_index] = [x1, y1, x2, y2]
-        self.update_display()
+        """Canvas drag handling - currently disabled for masks"""
+        # セグメンテーションマスクは通常はドラッグで編集しないため、
+        # このメソッドは基本的に何もしない
+        pass
 
     def on_canvas_release(self, event):
         """Canvas release handling"""
         self.dragging = False
-        self.drag_edge = None
 
     def on_canvas_motion(self, event):
         """Change cursor on mouse movement"""
@@ -788,58 +863,23 @@ class DocumentSegmentationApp:
         img_x = int((x - offset_x) / scale)
         img_y = int((y - offset_y) / scale)
 
-        # Change cursor
+        # セグメンテーションマスクの場合はカーソルを変更
         cursor = "arrow"
-        for bbox in self.bounding_boxes:
-            x1, y1, x2, y2 = bbox
-            if x1 <= img_x <= x2 and y1 <= img_y <= y2:
-                edge_threshold = 10
-                if abs(img_x - x1) < edge_threshold or abs(img_x - x2) < edge_threshold:
-                    cursor = "sb_h_double_arrow"
-                elif (
-                    abs(img_y - y1) < edge_threshold or abs(img_y - y2) < edge_threshold
-                ):
-                    cursor = "sb_v_double_arrow"
-                else:
-                    cursor = "fleur"
-                break
+        if self.processed_image is not None:
+            height, width = self.processed_image.shape[:2]
+            if 0 <= img_x < width and 0 <= img_y < height:
+                # マスクの上にカーソルがある場合は手のカーソルを表示
+                for mask in self.segmentation_masks:
+                    if torch_available and torch.is_tensor(mask):
+                        mask_np = mask.cpu().numpy()
+                    else:
+                        mask_np = mask
+
+                    if mask_np[img_y, img_x] > 0:
+                        cursor = "hand2"
+                        break
 
         self.canvas.config(cursor=cursor)
-
-    def delete_selected_bbox(self):
-        """Delete selected bounding box"""
-        if self.selected_box_index < 0:
-            messagebox.showwarning("Warning", "Please select a bounding box to delete")
-            return
-
-        if len(self.bounding_boxes) == 0:
-            messagebox.showwarning("Warning", "No bounding boxes to delete")
-            return
-
-        # Confirm deletion
-        result = messagebox.askyesno(
-            "Confirm Deletion",
-            f"Are you sure you want to delete bounding box {self.selected_box_index + 1}?",
-        )
-
-        if result:
-            # Remove the selected bounding box
-            del self.bounding_boxes[self.selected_box_index]
-
-            # Also remove from original bounding boxes if it exists
-            if self.selected_box_index < len(self.original_bounding_boxes):
-                del self.original_bounding_boxes[self.selected_box_index]
-
-            # Adjust selection index if necessary
-            if self.selected_box_index >= len(self.bounding_boxes):
-                self.selected_box_index = len(self.bounding_boxes) - 1
-            if len(self.bounding_boxes) == 0:
-                self.selected_box_index = -1
-
-            # Update display
-            self.update_display()
-
-            messagebox.showinfo("Success", "Bounding box deleted successfully")
 
 
 def main():
