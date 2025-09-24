@@ -28,6 +28,17 @@ except ImportError as e:
     print(f"Warning: PyTorch or Hi-SAM not available: {e}")
     print("The application will run without text line detection capability.")
 
+# Try to import TrOCR modules
+try:
+    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+
+    trocr_available = True
+
+except ImportError as e:
+    trocr_available = False
+    print(f"Warning: TrOCR (transformers) not available: {e}")
+    print("The application will run without OCR capability.")
+
 
 class DocumentSegmentationApp:
     def __init__(self, root):
@@ -48,12 +59,18 @@ class DocumentSegmentationApp:
         self.offset_x = 0
         self.offset_y = 0
         self.save_directory = None  # Save directory
+        self.ocr_results = []  # OCR results with position information
 
         # Load Hi-SAM model
         self.hi_sam_model = None
         self.auto_mask_generator = None
         self.model_type = "vit_s"  # デフォルトは軽量モデル
         self.load_hi_sam_model()
+
+        # Load TrOCR model
+        self.trocr_processor = None
+        self.trocr_model = None
+        self.load_trocr_model()
 
         # GUI components creation
         self.create_widgets()
@@ -159,6 +176,41 @@ class DocumentSegmentationApp:
             )
             self.hi_sam_model = None
             self.auto_mask_generator = None
+
+    def load_trocr_model(self):
+        """Load TrOCR model for OCR"""
+        if not trocr_available:
+            print("TrOCR not available. OCR functionality will be disabled.")
+            self.trocr_processor = None
+            self.trocr_model = None
+            return
+
+        try:
+            print("Loading TrOCR model...")
+            # TrOCRの学習済みモデルを使用
+            model_name = "microsoft/trocr-base-handwritten"
+
+            self.trocr_processor = TrOCRProcessor.from_pretrained(model_name)
+            self.trocr_model = VisionEncoderDecoderModel.from_pretrained(model_name)
+
+            # GPUが利用可能な場合はGPUを使用
+            if torch_available and torch.cuda.is_available():
+                self.trocr_model = self.trocr_model.to("cuda")
+                print("TrOCR model loaded successfully on CUDA")
+            else:
+                print("TrOCR model loaded successfully on CPU")
+
+        except Exception as e:
+            import traceback
+
+            print(f"Error loading TrOCR model: {e}")
+            print(traceback.format_exc())
+            messagebox.showwarning(
+                "Warning",
+                f"Failed to load TrOCR model: {e}\nThe application will run without OCR capability.",
+            )
+            self.trocr_processor = None
+            self.trocr_model = None
 
     def create_widgets(self):
         # Main frame
@@ -302,6 +354,19 @@ class DocumentSegmentationApp:
         ttk.Button(
             recognition_frame, text="Run Recognition", command=self.run_recognition
         ).pack(pady=5)
+
+        # OCR
+        ocr_frame = ttk.LabelFrame(left_panel, text="OCR")
+        ocr_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ocr_buttons_frame = ttk.Frame(ocr_frame)
+        ocr_buttons_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(ocr_buttons_frame, text="Run OCR", command=self.run_ocr).pack(
+            side=tk.LEFT, padx=(0, 5)
+        )
+        ttk.Button(
+            ocr_buttons_frame, text="Save OCR Results", command=self.save_ocr_results
+        ).pack(side=tk.LEFT)
 
         # Segmentation mask adjustment
         mask_frame = ttk.LabelFrame(left_panel, text="Segmentation Mask Adjustment")
@@ -638,6 +703,177 @@ class DocumentSegmentationApp:
                 torch.cuda.empty_cache()
 
             messagebox.showerror("Error", f"Error occurred during recognition: {e}")
+
+    def run_ocr(self):
+        """Run OCR on segmented text lines using TrOCR"""
+        if not self.segmentation_masks:
+            messagebox.showwarning(
+                "Warning", "No segmentation masks found. Please run recognition first."
+            )
+            return
+
+        if self.trocr_processor is None or self.trocr_model is None:
+            messagebox.showerror("Error", "TrOCR model not loaded")
+            return
+
+        if self.processed_image is None:
+            messagebox.showwarning("Warning", "No image loaded")
+            return
+
+        try:
+            # OCRの結果をクリア
+            self.ocr_results = []
+
+            # 各セグメンテーションマスクに対してOCRを実行
+            for i, mask in enumerate(self.segmentation_masks):
+                try:
+                    # マスクをnumpy配列に変換
+                    if torch_available and torch.is_tensor(mask):
+                        mask_np = mask.cpu().numpy()
+                    else:
+                        mask_np = mask.astype(np.uint8)
+
+                    # マスクの境界ボックスを取得
+                    contours, _ = cv2.findContours(
+                        mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                    )
+                    if len(contours) == 0:
+                        continue
+
+                    # 最大の輪郭を選択
+                    largest_contour = max(contours, key=cv2.contourArea)
+                    x, y, w, h = cv2.boundingRect(largest_contour)
+
+                    # 画像サイズ内に制限
+                    height, width = self.processed_image.shape[:2]
+                    x = max(0, min(x, width))
+                    y = max(0, min(y, height))
+                    w = min(w, width - x)
+                    h = min(h, height - y)
+
+                    if w <= 0 or h <= 0:
+                        continue
+
+                    # テキストライン画像を切り出し
+                    line_image = self.processed_image[y : y + h, x : x + w]
+
+                    # マスクを適用して背景を白にする
+                    mask_crop = mask_np[y : y + h, x : x + w]
+                    line_image_masked = line_image.copy()
+                    line_image_masked[mask_crop == 0] = [255, 255, 255]
+
+                    # BGR -> RGB変換
+                    line_image_rgb = cv2.cvtColor(line_image_masked, cv2.COLOR_BGR2RGB)
+
+                    # PIL Imageに変換
+                    pil_image = Image.fromarray(line_image_rgb)
+
+                    # TrOCRでOCR実行
+                    pixel_values = self.trocr_processor(
+                        images=pil_image, return_tensors="pt"
+                    ).pixel_values
+
+                    # GPUが利用可能な場合
+                    if torch_available and torch.cuda.is_available():
+                        pixel_values = pixel_values.to("cuda")
+
+                    # テキスト生成
+                    generated_ids = self.trocr_model.generate(pixel_values)
+                    generated_text = self.trocr_processor.batch_decode(
+                        generated_ids, skip_special_tokens=True
+                    )[0]
+
+                    # 結果を保存（y座標でソートするため）
+                    self.ocr_results.append(
+                        {
+                            "text": generated_text,
+                            "y_position": y,
+                            "x_position": x,
+                            "width": w,
+                            "height": h,
+                            "mask_index": i,
+                        }
+                    )
+
+                    print(f"OCR {i + 1}: {generated_text}")
+
+                except Exception as e:
+                    print(f"Error processing mask {i}: {e}")
+                    continue
+
+            # y座標でソート（上から下へ）
+            self.ocr_results.sort(key=lambda x: x["y_position"])
+
+            if self.ocr_results:
+                messagebox.showinfo(
+                    "OCR Complete",
+                    f"OCR completed for {len(self.ocr_results)} text lines.\n"
+                    "Use 'Save OCR Results' to save the text to a file.",
+                )
+            else:
+                messagebox.showinfo("Information", "No text could be recognized")
+
+        except Exception as e:
+            import traceback
+
+            print(f"Error in OCR: {e}")
+            print(traceback.format_exc())
+            messagebox.showerror("Error", f"Error occurred during OCR: {e}")
+
+    def save_ocr_results(self):
+        """Save OCR results to a text file"""
+        if not self.ocr_results:
+            messagebox.showwarning(
+                "Warning", "No OCR results to save. Please run OCR first."
+            )
+            return
+
+        # ファイル保存ダイアログ
+        if not self.save_directory:
+            save_path = filedialog.asksaveasfilename(
+                title="Save OCR Results",
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            )
+        else:
+            # デフォルトファイル名を生成
+            base_name = "ocr_results"
+            if self.current_file_path:
+                file_name = os.path.splitext(os.path.basename(self.current_file_path))[
+                    0
+                ]
+                base_name = f"{file_name}_ocr"
+
+            # ページ番号を追加（PDFの場合）
+            if self.total_pages > 1:
+                base_name += f"_page{self.current_page + 1:03d}"
+
+            default_filename = f"{base_name}.txt"
+            save_path = os.path.join(self.save_directory, default_filename)
+
+        if save_path:
+            try:
+                with open(save_path, "w", encoding="utf-8") as f:
+                    # ヘッダー情報を書き込み
+                    f.write("OCR Results\n")
+                    f.write(f"File: {self.current_file_path or 'Unknown'}\n")
+                    if self.total_pages > 1:
+                        f.write(f"Page: {self.current_page + 1}/{self.total_pages}\n")
+                    f.write(
+                        f"Generated: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    )
+                    f.write("=" * 50 + "\n\n")
+
+                    # OCR結果を書き込み（y座標順）
+                    for result in self.ocr_results:
+                        f.write(f"{result['text']}\n")
+
+                messagebox.showinfo(
+                    "Save Complete", f"OCR results saved to:\n{save_path}"
+                )
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save OCR results: {e}")
 
     def delete_selected_mask(self):
         """Delete selected segmentation mask"""
