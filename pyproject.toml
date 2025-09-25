@@ -23,6 +23,8 @@ dependencies = [
     "pymupdf>=1.26.3",
     "ruff>=0.12.7",
     "transformers>=4.56.2",
+    "openai>=1.109.0",
+    "python-docx>=1.2.0",
 ]
 
 [tool.ruff]

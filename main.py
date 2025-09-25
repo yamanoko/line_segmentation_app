@@ -39,6 +39,21 @@ except ImportError as e:
     print(f"Warning: TrOCR (transformers) not available: {e}")
     print("The application will run without OCR capability.")
 
+# Try to import OCR enhancement modules
+try:
+    import asyncio
+
+    from ocr_enhancement import OCREnhancementPipeline
+    from settings_dialog import show_settings_dialog
+    from word_generator import ConfidenceWordGenerator
+
+    enhancement_available = True
+
+except ImportError as e:
+    enhancement_available = False
+    print(f"Warning: OCR enhancement modules not available: {e}")
+    print("The application will run without OCR enhancement capability.")
+
 
 class DocumentSegmentationApp:
     def __init__(self, root):
@@ -60,6 +75,13 @@ class DocumentSegmentationApp:
         self.offset_y = 0
         self.save_directory = None  # Save directory
         self.ocr_results = []  # OCR results with position information
+        self.enhanced_results = []  # Enhanced OCR results with confidence
+        self.line_images = []  # Individual line images for enhancement
+
+        # OCR Enhancement settings
+        self.openai_api_key = ""
+        self.enhancement_iterations = 3
+        self.low_confidence_tokens = 10
 
         # Load Hi-SAM model
         self.hi_sam_model = None
@@ -368,7 +390,57 @@ class DocumentSegmentationApp:
             ocr_buttons_frame, text="Save OCR Results", command=self.save_ocr_results
         ).pack(side=tk.LEFT)
 
-        # Segmentation mask adjustment
+        # OCR Enhancement
+        enhancement_frame = ttk.LabelFrame(left_panel, text="OCR Enhancement")
+        enhancement_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # OpenAI API Key
+        api_key_frame = ttk.Frame(enhancement_frame)
+        api_key_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(api_key_frame, text="OpenAI API Key:").pack(side=tk.LEFT)
+        self.api_key_entry = ttk.Entry(api_key_frame, show="*", width=20)
+        self.api_key_entry.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
+
+        # Enhancement iterations
+        iterations_frame = ttk.Frame(enhancement_frame)
+        iterations_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(iterations_frame, text="Enhancement Iterations:").pack(side=tk.LEFT)
+        self.iterations_var = tk.IntVar(value=3)
+        iterations_spinbox = ttk.Spinbox(
+            iterations_frame, from_=1, to=10, textvariable=self.iterations_var, width=5
+        )
+        iterations_spinbox.pack(side=tk.RIGHT, padx=(5, 0))
+
+        # Low confidence tokens
+        confidence_frame = ttk.Frame(enhancement_frame)
+        confidence_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(confidence_frame, text="Low Confidence Tokens:").pack(side=tk.LEFT)
+        self.confidence_var = tk.IntVar(value=10)
+        confidence_spinbox = ttk.Spinbox(
+            confidence_frame, from_=1, to=100, textvariable=self.confidence_var, width=5
+        )
+        confidence_spinbox.pack(side=tk.RIGHT, padx=(5, 0))
+
+        # Enhancement buttons
+        enhancement_buttons_frame = ttk.Frame(enhancement_frame)
+        enhancement_buttons_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Button(
+            enhancement_buttons_frame,
+            text="Settings",
+            command=self.show_enhancement_settings,
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        ttk.Button(
+            enhancement_buttons_frame,
+            text="Enhance OCR",
+            command=self.run_ocr_enhancement,
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(
+            enhancement_buttons_frame,
+            text="Save to Word",
+            command=self.save_enhanced_word,
+        ).pack(side=tk.LEFT)  # Segmentation mask adjustment
         mask_frame = ttk.LabelFrame(left_panel, text="Segmentation Mask Adjustment")
         mask_frame.pack(fill=tk.X, pady=(0, 10))
 
@@ -723,6 +795,7 @@ class DocumentSegmentationApp:
         try:
             # OCRの結果をクリア
             self.ocr_results = []
+            self.line_images = []  # 個別の行画像もクリア
 
             # 各セグメンテーションマスクに対してOCRを実行
             for i, mask in enumerate(self.segmentation_masks):
@@ -761,6 +834,9 @@ class DocumentSegmentationApp:
                     mask_crop = mask_np[y : y + h, x : x + w]
                     line_image_masked = line_image.copy()
                     line_image_masked[mask_crop == 0] = [255, 255, 255]
+
+                    # 行画像を保存（後で拡張処理で使用）
+                    self.line_images.append(line_image_masked.copy())
 
                     # BGR -> RGB変換
                     line_image_rgb = cv2.cvtColor(line_image_masked, cv2.COLOR_BGR2RGB)
@@ -864,8 +940,11 @@ class DocumentSegmentationApp:
                     )
                     f.write("=" * 50 + "\n\n")
 
-                    # OCR結果を書き込み（y座標順）
-                    for result in self.ocr_results:
+                    # OCR結果を書き込み（y座標順にソート）
+                    sorted_results = sorted(
+                        self.ocr_results, key=lambda x: x.get("y_position", 0)
+                    )
+                    for result in sorted_results:
                         f.write(f"{result['text']}\n")
 
                 messagebox.showinfo(
@@ -874,6 +953,275 @@ class DocumentSegmentationApp:
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save OCR results: {e}")
+
+    def show_enhancement_settings(self):
+        """Show OCR enhancement settings dialog"""
+        if not enhancement_available:
+            messagebox.showerror(
+                "Error",
+                "OCR enhancement modules not available. Please install required packages.",
+            )
+            return
+
+        try:
+            settings = show_settings_dialog(self.root)
+            if settings:
+                # Update UI with new settings
+                self.api_key_entry.delete(0, tk.END)
+                self.api_key_entry.insert(0, settings.get("openai_api_key", ""))
+                self.iterations_var.set(settings.get("enhancement_iterations", 3))
+                self.confidence_var.set(settings.get("low_confidence_tokens", 10))
+
+                messagebox.showinfo("Settings", "Settings updated successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to show settings: {e}")
+
+    def run_ocr_enhancement(self):
+        """Run OCR enhancement using OpenAI API and ROVER"""
+        if not self.ocr_results:
+            messagebox.showwarning(
+                "Warning", "No OCR results found. Please run OCR first."
+            )
+            return
+
+        if not enhancement_available:
+            messagebox.showerror(
+                "Error",
+                "OCR enhancement modules not available. Please install required packages.",
+            )
+            return
+
+        # Get API key from UI
+        api_key = self.api_key_entry.get().strip()
+        if not api_key:
+            messagebox.showerror("Error", "Please enter your OpenAI API key.")
+            return
+
+        # Get parameters from UI
+        num_iterations = self.iterations_var.get()
+
+        if len(self.line_images) != len(self.ocr_results):
+            messagebox.showerror(
+                "Error",
+                "Mismatch between OCR results and line images. Please run OCR again.",
+            )
+            return
+
+        # Show rate limiting warning
+        estimated_time = (
+            len(self.ocr_results) * num_iterations * 4
+        )  # Rough estimate in seconds
+        estimated_minutes = estimated_time // 60
+        if estimated_minutes > 0:
+            result = messagebox.askquestion(
+                "Rate Limiting Notice",
+                f"To avoid OpenAI rate limits, processing will be slower with delays between requests.\n\n"
+                f"Estimated time: ~{estimated_minutes} minutes for {len(self.ocr_results)} lines with {num_iterations} iterations each.\n\n"
+                f"Do you want to continue?",
+                icon="question",
+            )
+            if result != "yes":
+                return
+
+        try:
+            # Create enhancement pipeline
+            enhancement_pipeline = OCREnhancementPipeline(api_key)
+
+            # Show progress dialog
+            progress_dialog = tk.Toplevel(self.root)
+            progress_dialog.title("Enhancing OCR (with rate limiting delays)...")
+            progress_dialog.geometry("450x180")
+            progress_dialog.transient(self.root)
+            progress_dialog.grab_set()
+
+            progress_label = ttk.Label(progress_dialog, text="Initializing...")
+            progress_label.pack(pady=10)
+
+            status_label = ttk.Label(
+                progress_dialog,
+                text="Starting enhancement process...",
+                foreground="blue",
+            )
+            status_label.pack(pady=5)
+
+            progress_bar = ttk.Progressbar(
+                progress_dialog, mode="determinate", length=300
+            )
+            progress_bar.pack(pady=10)
+
+            # Update UI
+            self.root.update()
+
+            def update_progress(current_line, total_lines):
+                """Update progress bar and label"""
+                progress_bar.config(value=current_line)
+                progress_label.config(
+                    text=f"Enhancing line {current_line}/{total_lines}..."
+                )
+                progress_dialog.update()
+
+            async def run_enhancement():
+                try:
+                    # Run enhancement with progress callback
+                    enhanced_results = await enhancement_pipeline.enhance_ocr_results(
+                        self.ocr_results,
+                        self.line_images,
+                        num_iterations,
+                        update_progress,
+                    )
+                    return enhanced_results
+                except Exception as e:
+                    raise e
+
+            # Run the async enhancement
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            try:
+                progress_label.config(text="Enhancing OCR with OpenAI...")
+                progress_bar.config(maximum=len(self.ocr_results))
+
+                self.enhanced_results = loop.run_until_complete(run_enhancement())
+
+                progress_dialog.destroy()
+
+                messagebox.showinfo(
+                    "Enhancement Complete",
+                    f"OCR enhancement completed for {len(self.enhanced_results)} lines.\n"
+                    "You can now save the enhanced results to a Word document.",
+                )
+
+            except Exception as e:
+                progress_dialog.destroy()
+                raise e
+            finally:
+                loop.close()
+
+        except Exception as e:
+            import traceback
+
+            print(f"Error in OCR enhancement: {e}")
+            print(traceback.format_exc())
+            messagebox.showerror("Error", f"Error occurred during OCR enhancement: {e}")
+
+    def save_enhanced_word(self):
+        """Save enhanced OCR results to Word document"""
+        if not self.enhanced_results:
+            messagebox.showwarning(
+                "Warning",
+                "No enhanced results found. Please run OCR enhancement first.",
+            )
+            return
+
+        if not enhancement_available:
+            messagebox.showerror(
+                "Error",
+                "Word generation module not available. Please install required packages.",
+            )
+            return
+
+        # Get parameters
+        num_low_confidence = self.confidence_var.get()
+
+        # Generate base filename
+        base_name = "transcription"
+        if self.current_file_path:
+            file_name = os.path.splitext(os.path.basename(self.current_file_path))[0]
+            base_name = file_name
+
+        # File paths for main transcription and detailed analysis
+        if not self.save_directory:
+            # Show file save dialog for main transcription
+            transcription_path = filedialog.asksaveasfilename(
+                title="Save Transcription Document",
+                defaultextension=".docx",
+                filetypes=[("Word documents", "*.docx"), ("All files", "*.*")],
+                initialfile=f"{base_name}.docx",
+            )
+            if not transcription_path:
+                return
+
+            # Generate detailed analysis path in same directory
+            base_dir = os.path.dirname(transcription_path)
+            analysis_filename = f"{base_name}_detailed_analysis.docx"
+            analysis_path = os.path.join(base_dir, analysis_filename)
+        else:
+            # Use save directory
+            transcription_path = os.path.join(self.save_directory, f"{base_name}.docx")
+            analysis_path = os.path.join(
+                self.save_directory, f"{base_name}_detailed_analysis.docx"
+            )
+
+        try:
+            # Debug: Print enhanced results structure (can be removed for production)
+            # print(f"DEBUG: Enhanced results count: {len(self.enhanced_results)}")
+            # if self.enhanced_results:
+            #     print(f"DEBUG: First result keys: {list(self.enhanced_results[0].keys())}")
+            #     first_result = self.enhanced_results[0]
+            #     print(f"DEBUG: enhanced_text: '{first_result.get('enhanced_text', 'NOT_FOUND')}'")
+            #     print(f"DEBUG: consensus_text: '{first_result.get('consensus_text', 'NOT_FOUND')}'")
+            #     print(f"DEBUG: confidence_scores length: {len(first_result.get('confidence_scores', []))}")
+
+            # Create Word generator
+            word_generator = ConfidenceWordGenerator()
+
+            # Generate document titles and page info
+            doc_title = "OCR Transcription"
+            analysis_title = "OCR Detailed Analysis"
+            page_info = None
+
+            if self.current_file_path:
+                filename = os.path.basename(self.current_file_path)
+                doc_title = f"Transcription: {filename}"
+                analysis_title = f"Analysis: {filename}"
+
+            # Add page information for multi-page documents
+            if self.total_pages > 1:
+                page_info = f"Page {self.current_page + 1}"
+
+            # Check if main transcription file exists for append mode
+            append_mode = os.path.exists(transcription_path)
+
+            # Create main transcription document (transcription only)
+            transcription_success = word_generator.create_transcription_only_document(
+                self.enhanced_results,
+                transcription_path,
+                doc_title,
+                append_mode=append_mode,
+                page_info=page_info,
+            )
+
+            # Create detailed analysis document (separate file)
+            analysis_success = word_generator.create_detailed_analysis_document(
+                self.enhanced_results,
+                num_low_confidence,
+                analysis_path,
+                analysis_title,
+                page_info=page_info,
+            )
+
+            if transcription_success and analysis_success:
+                append_msg = " (appended)" if append_mode else ""
+                messagebox.showinfo(
+                    "Save Complete",
+                    f"Documents saved successfully{append_msg}:\n\n"
+                    f"Main transcription:\n{transcription_path}\n\n"
+                    f"Detailed analysis:\n{analysis_path}",
+                )
+            elif transcription_success:
+                messagebox.showwarning(
+                    "Partial Success",
+                    f"Main transcription saved but detailed analysis failed:\n{transcription_path}",
+                )
+            else:
+                messagebox.showerror("Error", "Failed to create Word documents.")
+
+        except Exception as e:
+            import traceback
+
+            print(f"Error saving enhanced Word document: {e}")
+            print(traceback.format_exc())
+            messagebox.showerror("Error", f"Failed to save Word document: {e}")
 
     def delete_selected_mask(self):
         """Delete selected segmentation mask"""
@@ -1111,9 +1459,12 @@ class DocumentSegmentationApp:
                     else:
                         mask_np = mask
 
-                    if mask_np[img_y, img_x] > 0:
-                        cursor = "hand2"
-                        break
+                    # 各マスクのサイズを個別にチェック
+                    mask_height, mask_width = mask_np.shape[:2]
+                    if 0 <= img_x < mask_width and 0 <= img_y < mask_height:
+                        if mask_np[img_y, img_x] > 0:
+                            cursor = "hand2"
+                            break
 
         self.canvas.config(cursor=cursor)
 
