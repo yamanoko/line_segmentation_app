@@ -1,185 +1,341 @@
 # Document Image Segmentation App with Hi-SAM
 
-Hi-SAM (Hierarchical Segment Anything Model) を使用して、文書画像からテキストラインを検出・セグメンテーションするGUIアプリケーションです。
-
-## 機能
-
-### 1. Hi-SAM統合
-- **Hi-SAMモデル**: 高精度なテキストラインセグメンテーション
-- **セグメンテーションマスク**: バウンディングボックスの代わりにピクセルレベルのマスクを表示
-- **階層的テキスト理解**: ストローク、単語、テキストライン レベルでの処理
-
-### 2. ファイル読み込み
-- **対応形式**: PDF、PNG、JPG、JPEG
-- **操作**: 「ファイルを開く」ボタンからファイルを選択
-- **表示**: 選択したファイルがUI上に表示される
-
-### 2. PDFページ操作
-- **ページ切り替え**: 「前」「次」ボタンでページを切り替え
-- **ページ表示**: 現在のページ数と総ページ数を表示
-
-### 3. 表示制御
-- **拡大率**: スライダーで0.1倍～3.0倍まで調整可能
-- **表示位置**: X、Y位置スライダーで表示位置を調整
-- **スクロール**: マウスホイールやスクロールバーで画像を移動
-
-### 4. 前処理機能
-- **二値化**: チェックボックスで有効/無効、閾値スライダーで調整（0-255）
-- **回転**: スライダーで-180度～+180度まで回転可能
-- **歪み補正**: チェックボックスで簡易的な歪み補正を適用
-
-### 5. 文字認識
-- **認識実行**: 「認識実行」ボタンでONNXモデルによる文字領域検出
-- **結果表示**: 検出されたバウンディングボックスが画像上に表示
-
-### 6. バウンディングボックス操作
-- **一括サイズ調整**: スライダーで全てのバウンディングボックスを一括拡大・縮小
-- **個別編集**: マウスで各バウンディングボックスを個別に操作
-  - クリックで選択（赤色で表示）
-  - 辺をドラッグしてサイズ変更
-  - 中央をドラッグして移動
-  - 角の操作ポイントが表示される
-
-## 使用方法
-
-### 1. 環境構築
-```bash
-# uvでプロジェクトを初期化（既に完了）
-uv init
-
-# 依存関係のインストール（既に完了）
-uv add opencv-python onnxruntime pillow numpy PyMuPDF matplotlib
-```
-
-### 2. アプリケーション起動
-```bash
-uv run python main.py
-```
-
-### 3. 基本操作手順
-1. **ファイル選択**: 「ファイルを開く」ボタンから画像またはPDFを選択
-2. **表示調整**: 拡大率や位置スライダーで見やすく調整
-3. **前処理**: 必要に応じて二値化、回転、歪み補正を適用
-4. **認識実行**: 「認識実行」ボタンで文字領域を検出
-5. **結果調整**: バウンディングボックスのサイズや位置を調整
-
-## ファイル構成
-
-```
-line_segmentation_app/
-├── main.py          # メインアプリケーション
-├── model.onnx       # Detectron2 Mask R-CNNモデル
-├── pyproject.toml   # プロジェクト設定
-└── README.md        # このファイル
-```
-
-## モデルについて
-
-- **形式**: ONNX
-- **ベース**: Detectron2 Mask R-CNN
-- **用途**: 文書画像からの文字列抽出
-- **入力**: 画像データ（640x640にリサイズされます）
-- **出力**: バウンディングボックス座標のリスト（出力インデックス0番目）
-
-## カスタマイズ
-
-### モデルの出力形式調整
-モデルの出力形式に応じて、`run_recognition()`メソッド内の出力処理部分を調整してください：
-
-```python
-# 出力の最初の要素がバウンディングボックスと仮定
-predictions = outputs[0]
-
-# 出力形式に応じて調整が必要
-if len(predictions.shape) >= 2:
-    for detection in predictions[0]:  # バッチの最初を取得
-        if len(detection) >= 4:
-            # 座標を元の画像サイズに戻す
-            x1 = int(detection[0] / scale_x)
-            y1 = int(detection[1] / scale_y)
-            x2 = int(detection[2] / scale_x)
-            y2 = int(detection[3] / scale_y)
-            
-            # 信頼度チェック（信頼度が含まれている場合）
-            confidence = detection[4] if len(detection) > 4 else 1.0
-            if confidence > 0.5:  # 閾値
-                self.bounding_boxes.append([x1, y1, x2, y2])
-```
-
-### 前処理の拡張
-より高度な前処理を追加する場合は、`apply_preprocessing()`メソッドを拡張してください。
-
-## 注意事項
-
-- model.onnxファイルが同じディレクトリに存在する必要があります
-- モデルの出力形式によっては、認識結果の処理部分の調整が必要です
-- 大きなPDFファイルの場合、メモリ使用量にご注意ください
-- バウンディングボックスの操作は、拡大表示時により精密に行えます
-
-## トラブルシューティング
-
-### モデル読み込みエラー
-- model.onnxファイルの存在を確認
-- ファイルが破損していないか確認
-- ONNXランタイムのバージョンが適合しているか確認
-
-### 認識結果が表示されない
-- モデルの出力形式を確認
-- 信頼度閾値を調整
-- 前処理パラメータを調整
-
-### 表示が崩れる
-- 拡大率を調整
-- 表示位置を初期化（スライダーを中央に戻す）
-- アプリケーションを再起動
-
----
-
-# Document Image Segmentation Application
-
-A GUI application that uses a Detectron2-trained Mask R-CNN model (model.onnx) to extract and segment text strings from document images.
+A comprehensive GUI application that integrates Hi-SAM (Hierarchical Segment Anything Model) for high-precision text line detection and segmentation from document images, with advanced OCR capabilities using TrOCR and OpenAI-powered enhancement.
 
 ## Features
 
-### 1. File Loading
-- **Supported formats**: PDF, PNG, JPG, JPEG
-- **Operation**: Select files using the "Open File" button
-- **Display**: Selected files are displayed in the UI
+### 1. Hi-SAM Integration
+- **Hi-SAM Model**: High-precision hierarchical text line segmentation
+- **Segmentation Masks**: Pixel-level masks instead of simple bounding boxes
+- **Hierarchical Text Understanding**: Processing at stroke, word, text-line, and paragraph levels
+- **Automatic Mask Generation**: Intelligent text region detection
 
-### 2. PDF Page Operations
-- **Page navigation**: Switch pages using "Previous" and "Next" buttons
-- **Page display**: Shows current page number and total page count
+### 2. Advanced OCR Pipeline
+- **TrOCR Integration**: Microsoft's state-of-the-art OCR model for handwritten and printed text
+- **OCR Enhancement**: OpenAI GPT-powered text correction and improvement
+- **Confidence Analysis**: Low-confidence token identification and targeted enhancement
+- **Multiple Output Formats**: Plain text, Word documents with detailed analysis
 
-### 3. Display Controls
-- **Zoom**: Adjustable from 0.1x to 3.0x using slider
-- **Position**: Adjust display position with X, Y position sliders
-- **Scroll**: Move image using mouse wheel or scroll bars
+### 3. Document Processing
+- **Multi-format Support**: PDF, PNG, JPG, JPEG files
+- **PDF Navigation**: Page-by-page processing with navigation controls
+- **Preprocessing Pipeline**: Binarization, rotation, distortion correction
+- **Interactive Display**: Zoom, pan, and scroll capabilities
 
-### 4. Preprocessing Features
-- **Binarization**: Enable/disable with checkbox, adjust threshold with slider (0-255)
-- **Rotation**: Rotate from -180° to +180° using slider
-- **Distortion correction**: Apply simple distortion correction with checkbox
+### 4. Segmentation Mask Management
+- **Interactive Selection**: Click to select individual masks
+- **Mask Editing**: Delete unwanted segmentation regions
+- **Visual Feedback**: Selected masks highlighted in red, others in green
+- **Batch Operations**: Save all detected text regions or selected ones
 
-### 5. Text Recognition
-- **Run recognition**: Detect text regions using ONNX model with "Run Recognition" button
-- **Result display**: Detected bounding boxes are displayed on the image
+### 5. Export and Analysis
+- **Image Extraction**: Save cropped images for each detected text line
+- **OCR Results Export**: Export recognition results to text files
+- **Enhanced Word Documents**: Generate Word documents with confidence analysis
+- **Flexible Output Options**: Customizable save directories and file naming
 
-### 6. Bounding Box Operations
-- **Batch size adjustment**: Scale all bounding boxes simultaneously using sliders
-- **Individual editing**: Manipulate each bounding box individually with mouse
-  - Click to select (displayed in red)
-  - Drag edges to resize
-  - Drag center to move
-  - Corner control points are displayed
+## Prerequisites
 
-## Usage
+### System Requirements
+- **Operating System**: Windows, macOS, or Linux
+- **Python**: 3.8 or higher (3.12 recommended)
+- **GPU**: CUDA-compatible GPU recommended for optimal performance
+- **Memory**: 8GB RAM minimum, 16GB recommended
 
-### 1. Environment Setup
+### Required Software
+- **Git**: For cloning repositories
+- **Python Package Manager**: uv (recommended) or pip
+
+## Installation and Setup
+
+### Step 1: Clone the Repository
 ```bash
-# Initialize project with uv (already completed)
+git clone <your-repository-url>
+cd line_segmentation_app
+```
+
+### Step 2: Install Hi-SAM
+```bash
+# Clone Hi-SAM repository
+git clone https://github.com/ymy-k/Hi-SAM.git
+cd Hi-SAM
+
+# Install Hi-SAM requirements
+pip install -r requirements.txt
+cd ..
+```
+
+### Step 3: Install Python Dependencies
+Using uv (recommended):
+```bash
+# Initialize uv environment
 uv init
 
-# Install dependencies (already completed)
+# Install dependencies
+uv add torch torchvision --index-url https://download.pytorch.org/whl/cu118
+uv add opencv-python pillow numpy pymupdf matplotlib transformers openai python-docx
+uv add scipy scikit-image shapely pyclipper tqdm einops timm
+```
+
+Using pip:
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install PyTorch with CUDA support
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# Install other dependencies
+pip install opencv-python pillow numpy pymupdf matplotlib
+pip install transformers openai python-docx
+pip install scipy scikit-image shapely pyclipper tqdm einops timm
+```
+
+### Step 4: Download Model Weights
+
+#### Required SAM Weights
+Download the base SAM weights and place them in `Hi-SAM/pretrained_checkpoint/`:
+
+1. **SAM ViT-B**: [sam_vit_b_01ec64.pth](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth)
+2. **SAM ViT-L**: [sam_vit_l_0b3195.pth](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth) (optional)
+
+#### Hi-SAM Model Weights
+Download at least one Hi-SAM model weight:
+
+**Recommended for beginners:**
+- **Efficient Hi-SAM-S**: [Download](https://1drv.ms/u/s!AimBgYV7JjTlgcpZZz-xZiDiRBjfLQ?e=GK4uHo) (Lightweight, faster inference)
+
+**For better accuracy:**
+- **Hi-SAM-B**: [Download](https://1drv.ms/u/s!AimBgYV7JjTlgcosk3ZK1dImhxaW9g?e=xTsegH) (Balanced performance)
+- **Hi-SAM-L**: [Download](https://1drv.ms/u/s!AimBgYV7JjTlgcovMjJKfH6baFBTGw?e=T3IrUf) (High accuracy)
+
+#### Directory Structure After Setup
+```
+line_segmentation_app/
+├── main.py
+├── ocr_enhancement.py
+├── settings_dialog.py
+├── word_generator.py
+├── create_samples.py
+├── pyproject.toml
+├── README.md
+└── Hi-SAM/
+    ├── pretrained_checkpoint/
+    │   ├── sam_vit_b_01ec64.pth          # SAM base model
+    │   ├── efficient_hi_sam_s.pth        # Efficient Hi-SAM (recommended)
+    │   ├── hi_sam_b.pth                  # Hi-SAM Base (optional)
+    │   └── sam_vit_l_0b3195.pth          # SAM Large (optional)
+    ├── hi_sam/
+    │   └── modeling/
+    └── requirements.txt
+```
+
+### Step 5: Configure OpenAI API (Optional)
+For OCR enhancement features:
+1. Sign up for OpenAI API access
+2. Get your API key from the OpenAI dashboard
+3. Enter the API key in the application's enhancement settings
+
+## Usage Guide
+
+### Basic Workflow
+
+1. **Launch Application**
+   ```bash
+   uv run python main.py
+   ```
+
+2. **Load Document**
+   - Click "Open File" button
+   - Select PDF, PNG, JPG, or JPEG file
+   - Use navigation buttons for multi-page PDFs
+
+3. **Adjust Display**
+   - Use scale slider (0.1x - 3.0x) for zoom
+   - Adjust X/Y position sliders for panning
+   - Use mouse wheel for additional scrolling
+
+4. **Apply Preprocessing (Optional)**
+   - **Binarization**: Enable checkbox and adjust threshold (0-255)
+   - **Rotation**: Use slider for -180° to +180° rotation
+   - **Distortion Correction**: Enable checkbox for simple correction
+
+5. **Run Text Detection**
+   - Click "Run Recognition" button
+   - Wait for Hi-SAM to process the image
+   - Segmentation masks will appear as colored overlays
+
+6. **Interact with Results**
+   - **Select masks**: Click on any mask to select (turns red)
+   - **Delete masks**: Select unwanted masks and click "Delete Selected"
+   - **Adjust view**: Use display controls for better visibility
+
+7. **Run OCR (Optional)**
+   - Click "Run OCR" to extract text using TrOCR
+   - Results will be displayed in console
+   - Click "Save OCR Results" to export as text file
+
+8. **Enhance OCR (Optional)**
+   - Enter OpenAI API key in the enhancement section
+   - Adjust enhancement iterations (1-10)
+   - Set low confidence token threshold
+   - Click "Enhance OCR" for AI-powered correction
+   - Click "Save to Word" for detailed analysis document
+
+9. **Export Results**
+   - **Select Directory**: Choose where to save results
+   - **Save All**: Export all detected text regions as images
+   - **Save Selected**: Export only the selected mask region
+
+### Advanced Features
+
+#### OCR Enhancement Pipeline
+1. **TrOCR Processing**: Initial OCR using Microsoft's TrOCR model
+2. **Confidence Analysis**: Identifies low-confidence predictions
+3. **AI Enhancement**: Uses OpenAI GPT for context-aware correction
+4. **ROVER Consensus**: Combines multiple enhancement iterations
+5. **Word Export**: Generates comprehensive analysis documents
+
+#### Hi-SAM Model Selection
+The application automatically selects the best available model:
+- **Efficient Hi-SAM-S**: Fastest, good for real-time processing
+- **Hi-SAM-B**: Balanced speed and accuracy
+- **Hi-SAM-L**: Highest accuracy, slower processing
+
+#### Batch Processing Tips
+- Process multiple pages of PDFs sequentially
+- Save results to organized directory structures
+- Use consistent preprocessing settings for similar documents
+
+## File Structure
+
+```
+line_segmentation_app/
+├── main.py                    # Main application with GUI
+├── ocr_enhancement.py         # OCR enhancement pipeline
+├── settings_dialog.py         # Settings configuration dialog
+├── word_generator.py          # Word document generation
+├── create_samples.py          # Sample data creation utility
+├── pyproject.toml            # Project configuration and dependencies
+├── README.md                 # This documentation
+└── Hi-SAM/                   # Hi-SAM submodule
+    ├── hi_sam/               # Hi-SAM model implementation
+    ├── pretrained_checkpoint/ # Model weights directory
+    └── requirements.txt      # Hi-SAM specific requirements
+```
+
+## Configuration Options
+
+### Model Configuration
+- **Model Type**: Automatically detected from available weights
+- **Device**: Auto-selects CUDA if available, falls back to CPU
+- **Batch Processing**: Configurable for memory optimization
+
+### OCR Settings
+- **Enhancement Iterations**: 1-10 (default: 3)
+- **Low Confidence Threshold**: Number of tokens to focus enhancement on
+- **API Rate Limiting**: Built-in delays to respect OpenAI API limits
+
+### Export Settings
+- **Image Format**: PNG with transparency support
+- **Text Encoding**: UTF-8 for international character support
+- **Word Document**: Includes confidence analysis and enhancement details
+
+## Troubleshooting
+
+### Installation Issues
+
+**PyTorch Installation:**
+```bash
+# For CUDA 11.8
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# For CUDA 12.1
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# CPU-only version
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
+
+**Hi-SAM Import Errors:**
+- Ensure Hi-SAM directory is in the same folder as main.py
+- Check that all Hi-SAM requirements are installed
+- Verify model weights are in the correct directory
+
+### Runtime Issues
+
+**Model Loading Errors:**
+- Check if model files exist in `Hi-SAM/pretrained_checkpoint/`
+- Ensure sufficient memory (8GB+ recommended)
+- Try using Efficient Hi-SAM-S for lower memory usage
+
+**OCR Enhancement Errors:**
+- Verify OpenAI API key is valid and has credits
+- Check internet connection for API calls
+- Reduce enhancement iterations if hitting rate limits
+
+**Performance Issues:**
+- Use GPU acceleration when available
+- Reduce image resolution for faster processing
+- Close other memory-intensive applications
+
+### Common Error Messages
+
+**"Hi-SAM not available":**
+- Hi-SAM repository not cloned or not in correct location
+- Missing dependencies in Hi-SAM requirements.txt
+
+**"TrOCR not available":**
+- Transformers library not installed: `uv add transformers`
+- Model download failed - check internet connection
+
+**"Enhancement modules not available":**
+- Missing OpenAI library: `uv add openai`
+- Missing python-docx library: `uv add python-docx`
+
+## Performance Optimization
+
+### Memory Management
+- Use Efficient Hi-SAM-S for lower memory usage
+- Process large documents page by page
+- Close application between processing sessions for memory cleanup
+
+### GPU Acceleration
+- Ensure CUDA-compatible GPU is available
+- Install appropriate PyTorch version with CUDA support
+- Monitor GPU memory usage during processing
+
+### Processing Speed
+- Use lower resolution images when possible
+- Reduce enhancement iterations for faster OCR processing
+- Consider batch processing for multiple similar documents
+
+## Contributing
+
+Contributions are welcome! Please consider:
+- Bug reports and feature requests via issues
+- Code improvements via pull requests
+- Documentation enhancements
+- Model performance optimizations
+
+## License
+
+This project integrates multiple components with different licenses:
+- Hi-SAM: Check the original Hi-SAM repository for license terms
+- TrOCR: Microsoft's model with specific usage terms
+- OpenAI API: Subject to OpenAI's usage policies
+
+## Citation
+
+If you use this project in academic work, please cite the original Hi-SAM paper:
+```bibtex
+@article{zhang2024hi,
+  title={Hi-SAM: Marrying Segment Anything Model for Hierarchical Text Segmentation},
+  author={Zhang, Maoyuan and others},
+  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  year={2024}
+}
 uv add opencv-python onnxruntime pillow numpy PyMuPDF matplotlib
 ```
 
@@ -241,26 +397,22 @@ if len(predictions.shape) >= 2:
 ### Extending Preprocessing
 To add more advanced preprocessing, extend the `apply_preprocessing()` method.
 
-## Notes
+## Acknowledgments
 
-- The model.onnx file must exist in the same directory
-- Processing of recognition results may need adjustment depending on the model's output format
-- For large PDF files, please be mindful of memory usage
-- Bounding box operations can be performed more precisely when zoomed in
+This project builds upon several excellent open-source projects:
+- **Hi-SAM**: Hierarchical Segment Anything Model for text segmentation
+- **TrOCR**: Microsoft's Transformer-based OCR model  
+- **Segment Anything Model (SAM)**: Meta's foundation model for image segmentation
+- **OpenAI**: GPT models for text enhancement and correction
 
-## Troubleshooting
+## Support
 
-### Model Loading Error
-- Check if model.onnx file exists
-- Verify the file is not corrupted
-- Ensure ONNX Runtime version compatibility
+For support and questions:
+1. Check this documentation first
+2. Review the troubleshooting section
+3. Check the original Hi-SAM repository for model-specific issues
+4. Create an issue in this repository for application-specific problems
 
-### Recognition Results Not Displayed
-- Check model output format
-- Adjust confidence threshold
-- Adjust preprocessing parameters
+## Version History
 
-### Display Issues
-- Adjust zoom level
-- Reset display position (return sliders to center)
-- Restart the application
+- **v0.1.0**: Initial release with Hi-SAM integration, TrOCR OCR, and OpenAI enhancement
