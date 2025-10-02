@@ -1,0 +1,3 @@
+[submodule "Hi-SAM"]
+	path = Hi-SAM
+	url = https://github.com/ymy-k/Hi-SAM.git
